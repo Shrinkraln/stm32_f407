@@ -12,7 +12,7 @@
       2. 定时器任务：和软件定时器有关，需要启用软件定时器；如创建软件定时器，定期执行回调函数，和创建任务周期延迟的效果是一样的
    2. 用户创建的任务
 3. 中断驱动调度器
-   1. SysTick：产生时间片用于任务调度的时间单位，和系统节拍；通过时钟树配置cortex system timer即systick时钟；通过配置timebase source 选择hal库的hal_delay()等函数的时钟源是systick还是timx；通过HCLK配置内核时钟频率；SysTick 中断 -> xPortSysTickHandler() -> xTaskIncrementTick() -> xTickCount++->如果有任务可执行PendSV，如果超过位宽configTICK_TYPE_WITH_IN_WIDTH会回绕，硬件systick和软件tick的区别
+   1. SysTick：产生时间片用于任务调度的时间单位，和系统节拍；通过时钟树配置cortex system timer即systick时钟（不是溢出产生中断的频率）；通过配置timebase source 选择hal库的hal_delay()等函数的时钟源是systick还是timx；通过HCLK配置内核时钟频率；通过configTICJ_RATE_HZ宏定义修改systick溢出产生中断的频率；SysTick 中断 -> xPortSysTickHandler() -> xTaskIncrementTick() -> xTickCount++->如果有任务可执行PendSV，如果超过位宽configTICK_TYPE_WITH_IN_WIDTH会回绕，硬件systick和软件tick的区别
    2. SVC：启动第一个任务
    3. PendSV：后续的任务切换的执行
 4. 内核对象：信号量等同步量，任务，软件定时器，缓冲区
@@ -872,3 +872,59 @@ vTaskCreate(vTask_Handler,"task_name",(uint_t)stack_depth,(uint_t)prio,Return_Ha
    2. 当被调用函数结束时，将LR的值返回到PC
    3. 至于是否需要将LR的值压栈进行嵌套调用，是汇编的事情
 8. 栈溢出导致跑飞的原理是：SP溢出指向别的栈内，如果该栈没有修改，没有影响，如果有修改，导致应该写进PC的地址错误而跑飞
+
+## 2.3 FreeRTOS的命名规范
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_namerule.jpg)
+
+1. 三种重要的数据类型
+   1. TickType_t 记录系统节拍xTickCount
+      1. 作为xTaskGetTickCount()的返回值获取当前系统节拍计数值；使用pdTICKS_TO_MS()宏函数转换为真实的ms时间
+      2. 作为vTaskDelay()的参数设置需要延迟的系统节拍数；使用pdMS_TO_TICKS()宏函数将真实转换为系统节拍数
+   2. BaseType_t 记录成功/失败，选择当前架构下处理效率最高的数据类型
+      1. 作为函数返回值表示任务成功与否：pdPASS成功；pdFAIL失败；将创建函数作为if判断条件，分支处理创建失败
+      2. 作为函数参数设置是否使能某一功能
+   3. UBaseType_t 上者的无符号，表示一个非负数
+      1. 作为函数参数设置uint类型
+2. 变量的命名规则
+   1. 变量名=类型前缀+实际名字
+3. 函数的命名规则
+   1. 函数名=返回类型前缀+模块名+实际名字
+   2. 当函数是static静态函数，局限在函数内部中，前缀用prv，不用模块名
+4. 宏定义的命名规则
+   1. 宏定义名=文件名前缀+实际名字
+
+## 3.1 任务创建
+
+```c
+TaskHandle_t xTaskHandle;
+BaseType_t xTaskCreate( TaskFunction_t pvTaskCode,
+	const char * const pcName,//指向字符常量的指针，并且本身为常数，而不是指针指向字符串
+	unsigned short usStackDepth,
+	void *pvParameters,
+	UBaseType_t uxPriority,
+	TaskHandle_t *pvCreatedTask );
+```
+
+1. pvTaskCode 循环执行的任务代码
+2. pcName任务名称
+3. usStackDepth 栈深度
+4. pvParameter 作为创建的任务的参数，实现同一任务函数的复用于多个任务，但是本身是void *类型，传入时强转，在函数内部需要强转回
+5. uxPriority
+6. pcCreatedTask 先创建任务句柄，随后传入作为参数，修改句柄之后，通过句柄实现对任务的操作
+
+## 3.2 任务的状态
+
+1. ready
+2. running：当没有任务执行的时候执行idle
+3. block：等待资源或者超时vTaskDelay()而阻塞
+4. suspend：主动vTaskSuspend()挂起 
+5. HAL_Delay()是通过在while循环内一直查询当前时间是否到达指定时间，而不释放CPU；vTaskDelay()是通过记录当前任务唤醒的时刻并且将任务放进block
+
+## 3.3 时间片
+
+```c
+//设置systick中断
+#define configTICK_RATE_HZ                         100
+```
+
