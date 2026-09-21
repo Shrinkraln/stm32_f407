@@ -50,9 +50,9 @@
 #define configMAX_SYSCALL_INTERRUPT_PRIORITY     5<<4
 //配置是否使用时间片
 #define configUSE_TIME_SLICING                     0
+//系统节拍长度，及时间片长度，而pdMS_TO_TICK就是转化为tick数，所以时间长度一定要是tick单位时间的整数倍
+#define configTICK_RATE_HZ                         100
 ```
-
-
 
 ```c
 /*
@@ -928,3 +928,158 @@ BaseType_t xTaskCreate( TaskFunction_t pvTaskCode,
 #define configTICK_RATE_HZ                         100
 ```
 
+## 4. 按钮驱动
+
+1. 相对于裸机程序是先读取当前引脚状态，如果按下开始检测，FreeRTOS是使用vTaskDelay()设置周期10ms，而抖动区间是小于1ms，而按下持续时间是大于10ms的，也就不会出现按下状态是在两次采样之间而错过，因而不需要采样
+2. 创建复用函数
+   1. 定义结构体包含序号掩码以区分选中的port，和变量名序号的含义不一样，前者是从底层编号区分，能够被代码识别，后者是编程定义的变量的顺序，能被程序员识别
+   2. 结构体还包含引脚和回调函数
+   3. 先定义结构体变量，随后Init()根据port或者引脚实现对应外设的初始化
+3. 拆分文件 
+   1. 控制代码长度在300行内
+   2. 从定义结构体传参，到在整体头文件定义结构体变量，在各自文件引用变量，在文件内部对变量直接操作
+   3. 函数使用从vKeyInit(&hkey1)到vKey1Init(void)
+
+## 5. 堆内存管理
+
+1. malloc()是不可重入函数，多个任务同时调用会报错；碎片化严重和执行慢
+2. pvPortMalloc()和vPortFree()
+3. heap1：只有pvPortMalloc，没有回收机制
+   1. 内部是一个ucHeap[configTOTAL_HEAP_SIZE]数据实现
+   2. 只创建内核对象而不销毁：如创建任务而不删除释放
+4. heap2：过时方案，但是保留以兼容旧项目
+   1. 在heap1上优化，添加回收内存
+   2. 内部同样uwHeap数组
+   3. 最优匹配算法：恰能满足的最小空闲块
+   4. 数组头部自身是有8byte的内存头；数组结尾是有一个长度0的，但是有内存头的xEnd
+   5. 内碎片化严重：不仅仅是每次分配之后的剩余外碎片，还有每次使用之后会切割内存头
+   6. 不合并相邻空闲块
+5. heap3：
+   1. 对malloc和free改造，使其可重入
+   2. 在pvPorrMalloc()和vPortFree()前后使用vTaskSuspendAll()和vTaskResumeAll()暂停调度器
+6. heap4：
+   1. 在heap2上优化，添加合并相邻空闲块
+7. heap5：
+   1. 在heap4上优化，可以控制不同地址上的堆内存数组
+8. 内存使用情况分析：
+   1. 根据使用的编译工具的编译输出结果判断整个项目的空间存储消耗
+   2. 在FreeRTOS，任务堆是和系统的堆独立区分的
+   3. 在heap 124中，ucHeap[]数组是未定义的静态变量，存储在.bss段
+   4. 而FreeRTOS的内核对象是默认动态创建，即内核对象是存储在ucHeap[]里面，包括任务控制块和任务栈深度
+   5. 而裸机原本的.heap段用来printf等一些c库函数调用
+   6. xPortGetFreeHeapSize()获取当前剩余的内存量；xPortGetMinimalFreeHeapSize()获取历史最小的剩余量
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_memang.jpg)
+
+## 6.1 二进制信号量
+
+1. 用于任务与任务之间，或者任务与中断之间同步
+2. 同步：通过发信号的方式，将两个不相干的任务联动起来
+
+```c
+SemaphoreHandle_t xSem;
+xSem= xSemaphoreCreateBinary();
+xSemaphoreGive(xSem);
+xSemaphoreTask(xSem,TickType_t);
+vSemaphoreDelete(xSem);
+```
+
+## 6.2 中断和二进制信号量
+
+1. 中断的优先级是高于任务的，所以当触发中断且中断占用时间长的时候，任务是不执行的
+2. 所以实际使用是在中断中释放信号量，在一个新的任务中执行
+3. 在中断中使用的API必须是带FromISR后缀的函数
+4. 有一个返回的参数，表示当前中断释放信号量之后是否有更高优先级任务被唤醒，定义时设置初始值pdFALSE
+5. 需要修改configMAX_SYSCALL_INTERRUPT_PRIORITY设置允许调用FromISR的最高中断优先级
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_SemFromISR.jpg)
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_SemFromISR_Prio.jpg)
+
+## 6.3 二进制信号量和DMA
+
+1. vTaskDelay()是执行到当前语句的时候开始suspend，是前后两条语句之间的gap
+2. 如果在高优先级通讯中，大部分时间用于轮询和传输，会导致低优先级任务ready之后不能正常执行，而被强迫改变gap
+3. 传输完成的中断函数中释放二进制信号量通知任务传输完成以继续
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_SemDMA.jpg)
+
+## 7. 计数信号量
+
+1. 多个生产者，多个消费者；但是多个消费者哪一个获取到是根据任务本身优先级或者同优先级FIFO确定
+2. 计数信号量用于事件计数：初始计数值0，向上计数；累计还未处理的事件的数量，保证事件全部处理
+3. 计数信号量用于守护资源：初始计数值和最大计数值保持一致，向下计数；记录剩余资源的数量，保证资源不超出最大值
+
+```c
+xSemaphoreHandle_t xSem;
+xSem=xSemaphoreCreateCounting(uxMaxCount,uxInitialCount);
+```
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_SemCount.jpg)
+
+## 8.1 队列
+
+1. 二进制信号量--添加槽位-->计数信号量--附带数据-->队列--长度为1-->邮箱
+2. 创建队列时当任务堆内存大小不够时失败，返回NULL；占据的字节是QueueHead+QueueLen*ItemSize
+3. 调用pdMS_TO_TICK的时候，转换的时间长度必须是tick的单位时间长度的整数倍
+4. 通讯的守门员任务：
+   1. 在多个任务直接接触到通讯外设时，如果在前一个任务BUSY的时候下一个任务使用外设传输，下一个任务直接报错
+   2. 添加守门员任务：原本的任务添加队列，xQueueSend()发送到公共队列上；守门员任务xQueueReceive()从公共队列读取，随后控制外设发布
+5. 通讯时按值拷贝和按引用拷贝
+   1. 如果按值拷贝：每个Item都是一个完整的字符串，内存消耗大
+   2. 按引用拷贝：每个Item都只是对应字符串的首地址
+   3. Queue存储的Item不再是具体的值，而是指针；而传入参数是Item的地址，所以这种情况下是传入二级指针
+   4. 需要原任务在Send的时候先malloc()一个内存，将其指针地址传给Queue；如果不malloc是用提前预留的缓冲区，存储在.bss段，地址不会变，但是需要给缓冲区上锁保护；buff和malloc都是整个字符串作为一个整体，首地址作为Item传入到Queue当中，但是前者是多个整个在一个任务中共用一个buff，不然内存崩溃，后者是不停分配但是也会在守门员任务中回收；
+   5. malloc之后要strcpy(pmem,str)，然后send(&pmem)
+   6. 在守门员任务中，先定义一个同样类型的指针，随后reverive(&pmem)，pmem的值是一样的，也就是说在堆内存的地址是一样的，然后free()释放
+
+```c
+QueueHandle_t hQ;
+hQ=xQueueCreate(uxQueueLen,uxItemSize);//返回值为NULL为创建失败
+xQueueReveive(hQ,&data,portMAX_DELAY);
+```
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_QueueAPI.jpg)
+
+## 8.2 邮箱
+
+1. 邮箱和队列是一个内核对象
+2. peek只窥探，不拿出数据
+3. 邮箱的特点
+   1. Queue是同步的，有严格的FIFO顺序，并且每次receive都是对一个不重复的Item操作；MailBox是异步的，只要有数据，就可以peek，多次peek可以对同一个Item
+   2. 只看不取，适合广播，即多个Receiver都；获取同一个Item；信号量和队列允许多个Receiver但是不允许获取同一个Item
+4. 应用：
+   1. 前端AFE采集数据；但是保证其他任务处理的都是同一个数据？需要其他同步量优化
+   2. 在二元信号量与中断应用的基础上添加一定的简短数值，但是send和receive
+   3. 状态机，警告任务，等只需要获取最新状态的
+   4. 高优先级任务先peek再决定是否reveive拿数据
+
+```c
+xMail=xQueueCreate(1,sizeof(Type));
+BaseType_t xQueueOverWrite(hQ,&item);
+BaseType_t xQueuePeek(hQ,&item,TickType_t xTicksToWait);//窥探不拿出数据
+```
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_MailBoxAPI.jpg)
+
+## 9.1 软件定时器
+
+1. 周期性的执行一段代码：自动重装；
+2. 延迟一段时间之后执行一段代码：不自动重装
+3. 使能软件定时器之后，再vTaskSchduler()之后会创建软件定时器任务
+4. 计时单位是configTICK_RATE_HZ
+
+```c
+//创建
+TimerHandler_t xTimerCreate(pcTimername,//定时器名称
+                           xTimerPeriod,//周期，单位是系统节拍configTICK_RATE_HZ
+                           uxAUtoReload,//是否重装载
+                           pvTimerID,//定时器ID，相当于回调函数参数
+                           pxCallback);//回调函数
+//创建之后需要start
+BaseType_t xTimerStart(htimer,TickType_t);//如果阻塞等待的时间
+```
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_TimerInit.jpg)
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_TimerAPI.jpg)
