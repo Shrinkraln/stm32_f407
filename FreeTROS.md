@@ -1068,6 +1068,24 @@ BaseType_t xQueuePeek(hQ,&item,TickType_t xTicksToWait);//窥探不拿出数据
 2. 延迟一段时间之后执行一段代码：不自动重装
 3. 使能软件定时器之后，再vTaskSchduler()之后会创建软件定时器任务
 4. 计时单位是configTICK_RATE_HZ
+5. 使用API之后是向定时器任务队列发送一个Item；定时器任务从队列取出消息并执行
+6. API的参数指定的是等待放进队列的最长时间
+7. 定时器任务：
+   1. 不是基于时间片的周期执行，而是基于systick中断，虽然时间片长度就是一个systick中断周期。在每个systick中断中，先incretick()，随后从delay列表的首元素获取其唤醒的时间（该列表式按照唤醒时间排序的，是block类列表），判断当前是否有任务超时需要唤醒；对于vTaskDelay()就是调用的任务，对于不同的定时器，定时器任务又本身只取超时时间最近的定时器，所以定时器任务对外暴露一个超时时间；如果有，将任务移进ready列表，如果优先级比当前任务高，置pendsv挂起位1；当systick中断结束，进入pendsv中断，执行任务切换
+   2. 取出消息并执行
+   3. 判断当前是否有到期任务，执行其回调函数
+
+8. 回调函数：
+
+   1. 不能带阻塞的API，定时器任务执行回调函数，如果阻塞，在下一个systick中断产生的时候就不能判断是否有超时需要放回ready列表；可以将阻塞前后的代码拆分到两个状态机，前者的周期是原本周期，后者周期是delay的时间，在本阶段执行完之后，修改period为下一阶段周期，并修改状态机
+   1. 不能长时间霸占CPU，尽管是有systick中断打断，但是打断之后没有更高优先级任务执行，还是执行定时器任务
+
+9. 和硬件定时器区别
+
+   1. 硬件用于PWM IC OC等，微妙级周期，周期是中断触发，即中断回调开始执行的间隔，更加精细控制开始执行的周期
+   2. 软件用于设置毫秒级周期，周期是两次回调函数之间的间隔，控制执行的间隔
+
+10. SysTick 中断产生后，先递增 tick，检查是否有任务超时需要唤醒；如果有，就把它们放到就绪列表。然后判断最高优先级就绪任务是否高于当前任务，如果需要切换，就挂起 PendSV。等 SysTick 中断退出后，PendSV 执行真正的任务上下文切换。软件定时器服务任务如果因为等待下一个定时器到期而被唤醒，它会在任务上下文中运行，并执行软件定时器回调。
 
 ```c
 //创建
@@ -1077,9 +1095,11 @@ TimerHandler_t xTimerCreate(pcTimername,//定时器名称
                            pvTimerID,//定时器ID，相当于回调函数参数
                            pxCallback);//回调函数
 //创建之后需要start
-BaseType_t xTimerStart(htimer,TickType_t);//如果阻塞等待的时间
+BaseType_t xTimerStart(htimer,TickType_t Ticks_To_Wait);//如果队列满，等待的时间
 ```
 
 ![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_TimerInit.jpg)
 
 ![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_TimerAPI.jpg)
+
+![](D:\coding_codes\stm32f407\learning_logs\resources\FreeRTOS_TimerQueue.jpg)
